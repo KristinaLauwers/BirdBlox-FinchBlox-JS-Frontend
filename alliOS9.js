@@ -50511,7 +50511,7 @@ MicroBlocksRuntime.prototype.stopAndSyncScripts = async function(alreadyStopped)
 	//if (and (notNil port) (true != alreadyStopped)) {
 	if ( (!this.noBleConnection()) && (true != alreadyStopped)) {
 		this.sendStopAll()
-		this.softReset()
+		await this.softReset()
 	}
 	this.clearRunningHighlights()
 	//doOneCycle (global 'page')
@@ -50525,10 +50525,10 @@ MicroBlocksRuntime.prototype.stopAndSyncScripts = async function(alreadyStopped)
 }
 
 
-MicroBlocksRuntime.prototype.softReset = function() {
+MicroBlocksRuntime.prototype.softReset = async function() {
 	// Stop everyting, clear memory, and reset the I/O pins.
 
-	this.sendMsg('systemResetMsg') // send the reset message
+	await this.sendMsgSync('systemResetMsg') // send the reset message
 }
 
 /*
@@ -50808,25 +50808,30 @@ MicroBlocksRuntime.prototype.justConnected = async function() {
 		var codeReuseDisabled = true //false // set this to false to attempt to reuse code on board
 		if (codeReuseDisabled || (this.chunkIDsIsEmpty()) || (!(await this.boardHasSameProject()))) {
 			if (!codeReuseDisabled) { console.log('Full download') }
-			this.clearBoardIfConnected()
+			await this.clearBoardIfConnected()
 		} else {
 			console.log('Incremental download ' + this.vmVersion + this.boardType)
 		}
 		this.recompileAll = true
 		await this.stopAndSyncScripts(true)
-		this.softReset()
+		//await this.softReset() //this was clearing the scripts you just synced?
 	//}
 }
 
 //Hatchling specific method
 //Clear everything from the last file from the board and load the new file's info
 MicroBlocksRuntime.prototype.loadData = async function() {
-	this.clearBoardIfConnected(true) //will sendStopAll and clearRunningHighlights and softReset
+	//console.log("**** loadData")
+	this.dataLoading = true
+
+	await this.clearBoardIfConnected(true) //will sendStopAll and clearRunningHighlights and softReset
 
 	if (!this.noBleConnection()) { 
 		await this.saveAllChunksAfterLoad()
 	}
 
+	this.dataLoading = false
+	//console.log("**** loadData finished")
 }
 
 /*
@@ -51067,12 +51072,12 @@ method installBoardSpecificBlocks SmallRuntime {
 }
 */
 
-MicroBlocksRuntime.prototype.clearBoardIfConnected = function(doReset) {
+MicroBlocksRuntime.prototype.clearBoardIfConnected = async function(doReset) {
 	//if (notNil port) {
 	if (!this.noBleConnection()) {
 		this.sendStopAll()
-		if (doReset) { this.softReset() }
-		this.sendMsgSync('deleteAllCodeMsg') // delete all code from board
+		if (doReset) { await this.softReset() }
+		await this.sendMsgSync('deleteAllCodeMsg') // delete all code from board
 	}
 	//clearVariableNames this
 	this.clearRunningHighlights()
@@ -51343,7 +51348,7 @@ MicroBlocksRuntime.prototype.saveChunk = async function(aBlockOrFunction, skipHi
 		return false
 	}
 
-	var restartChunk = ((aBlockOrFunction instanceof Block) && (this.isRunning(aBlockOrFunction)))
+	var restartChunk = ((aBlockOrFunction instanceof Block) && ((this.isRunning(aBlockOrFunction)) || (aBlockOrFunction.autoExecute && !aBlockOrFunction.stack.isDisplayStack)))
 
 	//SERIAL
 	// Note: micro:bit v1 misses chunks if time window is over 10 or 15 msecs
@@ -51354,7 +51359,7 @@ MicroBlocksRuntime.prototype.saveChunk = async function(aBlockOrFunction, skipHi
 		sendMsgSync this 'chunkCodeMsg' chunkID data
 	}*/
 	//BLE
-	this.sendMsg('chunkCodeMsg', chunkID, data)
+	await this.sendMsgSync('chunkCodeMsg', chunkID, data)
 
 	//processMessages this //I dont' think we need to do this - already doing it in DeviceHatchling
 	entry[1] = newCRC//this.computeCRC(chunkBytes) // remember the CRC of the code we just saved
@@ -51676,11 +51681,16 @@ method saveVariableNames SmallRuntime {
 */
 
 MicroBlocksRuntime.prototype.runChunk = function(chunkID) {
-	this.sendMsg('startChunkMsg', chunkID)
+	//console.log("**** runChunk " + chunkID)
+	if (chunkID != null) {
+		this.sendMsg('startChunkMsg', chunkID)
+	}
 }
 
 MicroBlocksRuntime.prototype.stopRunningChunk = function(chunkID) {
-	this.sendMsg('stopChunkMsg', chunkID)
+	if (chunkID != null) {
+		this.sendMsg('stopChunkMsg', chunkID)
+	}
 }
 
 /*
@@ -51909,6 +51919,7 @@ MicroBlocksRuntime.prototype.errorString = function(errID) {
 }
 
 MicroBlocksRuntime.prototype.sendMsg = function(msgName, chunkID, byteList) {
+	//console.log("**** sendMsg " + msgName + " " + chunkID)
 	//ensurePortOpen this
 	//if (isNil port) { return }
 	var device = this.bleDevice()
@@ -52103,11 +52114,12 @@ method skipMessage SmallRuntime discard {
 // Message handling
 
 MicroBlocksRuntime.prototype.handleMessage = function(msg) {
-	//console.log("handleMessage: [" + msg + "]")
+	//console.log("**** handleMessage: [" + msg + "]")
 	this.lastPingRecvMSecs = Date.now() //(msecsSinceStart) // reset ping timer when any valid message is recevied
 	var op = msg[1]
 	var chunkID = msg[2]
 	if (op == this.msgNameToID('taskStartedMsg')) {
+		//console.log("*** started chunk " + chunkID)
 		this.updateRunning(chunkID, true)
 	} else if (op == this.msgNameToID('taskDoneMsg')) {
 		this.updateRunning(chunkID, false)
@@ -52115,6 +52127,7 @@ MicroBlocksRuntime.prototype.handleMessage = function(msg) {
 		this.showResult(chunkID, this.returnedValue(msg), false, true)
 		this.updateRunning(chunkID, false)
 	} else if (op == this.msgNameToID('taskErrorMsg')) {
+		//console.log("**** error message for chunk " + chunkID + " = " + this.errorString(msg[5]))
 		this.showError(chunkID, this.errorString(msg[5]))
 		this.updateRunning(chunkID, false)
 	} else if (op == this.msgNameToID('outputValueMsg')) {
@@ -52474,6 +52487,7 @@ method removeResultBubbles SmallRuntime {
 */
 
 MicroBlocksRuntime.prototype.showError = function(chunkID, msg) {
+	if (this.dataLoading) { return } //Sometimes there is an error during load, but it's not useful
 	this.showResult(chunkID, msg, true)
 }
 
